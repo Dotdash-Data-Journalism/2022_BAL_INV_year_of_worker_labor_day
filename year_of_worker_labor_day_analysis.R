@@ -7,8 +7,27 @@ library(purrr)
 library(tidyr)
 library(lubridate)
 library(zoo)
+library(httr)
 
 ### Functions Section ###
+# This function is now needed to access BLS data programmatically as per 
+# their policy outlined here: https://www.bls.gov/bls/pss.htm
+get_bls_data <- function(url, email) {
+  bls_res <- GET(url = url, user_agent(email))
+  stop_for_status(bls_res)
+  
+  bls_content <- content(bls_res, 
+                         as = "parsed",
+                         type = "text/tab-separated-values",
+                         encoding = "UTF-8",
+                         col_names = T,
+                         col_types = cols(.default = col_character()),
+                         trim_ws = T
+  )
+  return(bls_content)
+  
+}
+
 # This function takes a row number fed to it from the for loop in the 
 # Visualization 1 section (approx rows 98-108) and calculates the row number
 # of the pre-recessionary peak payroll employment (i.e. where the `peak` column
@@ -38,9 +57,10 @@ rolling_chg <- function(x) {
 # which includes payroll employment, earnings, and wage data.
 # From text files here: https://www.bls.gov/ces/data/
 
-all_ces <- read_delim(file = "https://download.bls.gov/pub/time.series/ce/ce.data.0.AllCESSeries", 
-                      delim = "\t", trim_ws = T, col_names = T,
-                      col_types = "cccdc")
+all_ces <- get_bls_data(
+  "https://download.bls.gov/pub/time.series/ce/ce.data.0.AllCESSeries",
+                        "anesta@dotdashmdp.com"
+  )
 
 # Getting exact NBER recession dates from FRED (St. Louis Federal Reserve Bank): 
 # https://fred.stlouisfed.org/series/USREC
@@ -68,7 +88,8 @@ recession_dates %>%
 
 all_ces %>% 
   filter(series_id == "CES0000000001") %>% 
-  mutate(date = base::as.Date(paste0(year, "-", str_sub(period, 2, 3), "-01"))) %>% 
+  mutate(date = base::as.Date(paste0(year, "-", str_sub(period, 2, 3), "-01")),
+         value = as.numeric(value)) %>% 
   filter(between(date, base::as.Date("1969-12-01"), max(rec_w_peak$date))) %>% 
   select(date, value) -> unemployment_post_1969
 
@@ -187,7 +208,7 @@ write_csv(emp_rec_final_sorted, "./visualizations/emp_rec_final.csv")
 # Editorial decision. Including only months of July '22 and February of '19 to compare.
 
 all_ces %>% 
-  filter(as.integer(year) %in% c(2019L, max(year, na.rm = T))) %>% 
+  filter(as.integer(year) %in% c(2019L, 2022L)) %>% 
   mutate(seas_adj = str_sub(series_id, 3, 3),
          supersector = str_sub(series_id, 4, 5),
          industry = str_sub(series_id, 6, 11),
@@ -201,15 +222,17 @@ all_ces %>%
          data_type == "01") -> supersector_latest_pre_covid
 
 # Reading in industry code reference file
-industry_codes <- read_delim(file = "https://download.bls.gov/pub/time.series/ce/ce.industry", 
-                             delim = "\t", trim_ws = T, col_names = T,
-                             col_types = cols(.default = col_character()))
+industry_codes <- get_bls_data(
+  "https://download.bls.gov/pub/time.series/ce/ce.industry",
+  "anesta@dotdashmdp.com"
+  )
 
 # Calculating the Feb. '19 to Jul. '22 payroll employment level percent change
 # and joining the `industry_codes` reference file for industry name columns
 supersector_latest_pre_covid %>% 
   arrange(series_id, desc(date)) %>% 
-  mutate(job_diff = round((value - lead(value)) * 1000),
+  mutate(value = as.numeric(value),
+         job_diff = round((value - lead(value)) * 1000),
          industry_code = str_c(supersector, industry)) %>%
   left_join(industry_codes, by = "industry_code") %>%
   filter(date == max(date)) %>% 
@@ -234,7 +257,7 @@ filter(industry_codes, !(display_level %in% c("0", "1", "2", "3"))) %>%
 # Filtering to data post-2019 and including only July of 2022 and Feburary of 2019
 # to compare payroll employment levels
 all_ces %>% 
-  filter(as.integer(year) %in% c(2019L, max(year, na.rm = T))) %>% 
+  filter(as.integer(year) %in% c(2019L, 2022L)) %>% 
   mutate(seas_adj = str_sub(series_id, 3, 3),
          supersector = str_sub(series_id, 4, 5),
          industry = str_sub(series_id, 6, 11),
@@ -244,21 +267,21 @@ all_ces %>%
   ) %>% 
   filter(seas_adj == "S",
          industry_code %in% detailed_codes,
-         date %in% c(base::as.Date("2022-07-01") - months(1), base::as.Date("2019-02-01")),
+         date %in% c(base::as.Date("2022-07-01"), base::as.Date("2019-02-01")),
          data_type == "01") -> detailed_latest_pre_covid
 
 # Calculating Feb. '19 to Jul. '22 percent change in employment levels by
 # subindustry. Join the subindustry/supersector reference file.
 detailed_latest_pre_covid %>% 
   arrange(series_id, desc(date)) %>% 
-  mutate(`Total Change` = round((value - lead(value)) * 1000),
+  mutate(value = as.numeric(value),
+         `Total Change` = round((value - lead(value)) * 1000),
          `Percent Change` = ((value - lead(value)) / lead(value)) * 100) %>% 
   filter(date == max(date)) %>% 
   arrange(desc(`Percent Change`)) %>% 
   left_join(industry_codes, by = "industry_code") %>% 
-  left_join(read_delim(file = "https://download.bls.gov/pub/time.series/ce/ce.supersector", 
-                       delim = "\t", trim_ws = T, col_names = T,
-                       col_types = cols(.default = col_character())), by = c("supersector" = "supersector_code")) %>% 
+  left_join(get_bls_data("https://download.bls.gov/pub/time.series/ce/ce.supersector",
+                         "anesta@dotdashmdp.com"), by = c("supersector" = "supersector_code")) %>% 
   rename(Industry = industry_name, Supersector = supersector_name) %>% 
   select(Industry, Supersector, `Total Change`, `Percent Change`) -> detailed_industry_change
 
@@ -286,14 +309,16 @@ write_csv(detailed_industry_change_outliers, "./visualizations/detailed_industry
 
 # Reading in CPS labor force data from the BLS
 # Text files from here: https://www.bls.gov/cps/data.htm
-all_cps_ln <- read_delim(file = "https://download.bls.gov/pub/time.series/ln/ln.data.1.AllData", 
-                                    delim = "\t", trim_ws = T, col_names = T,
-                                    col_types = cols(.default = col_character()))
+all_cps_ln <- get_bls_data(
+  "https://download.bls.gov/pub/time.series/ln/ln.data.1.AllData",
+  "anesta@dotdashmdp.com"
+  )
 
 # Reading in CPS series reference file to get each series' full name
-ln_series <- read_delim(file = "https://download.bls.gov/pub/time.series/ln/ln.series", 
-                        delim = "\t", trim_ws = T, col_names = T,
-                        col_types = cols(.default = col_character()))
+ln_series <- get_bls_data(
+  "https://download.bls.gov/pub/time.series/ln/ln.series",
+  "anesta@dotdashmdp.com"
+)
 
 # Prime age employment levels series for White, Black, Latino/a, and Asian men & women
 prime_age_emp_series <- c("LNU02000064", "LNU02000065",
@@ -405,10 +430,10 @@ write_csv(epr_yo3y_chg_race_gender, "./visualizations/epr_yo3y_chg_race_gender.c
 ## from Q1 2020 to Q2 2022 from the BLS Employment Cost Index
 
 # From text files here: https://www.bls.gov/ncs/ect/data.htm
-
-all_eci <- read_delim(file = "https://download.bls.gov/pub/time.series/ci/ci.data.1.AllData", 
-                      delim = "\t", trim_ws = T, col_names = T,
-                      col_types = cols(.default = col_character()))
+all_eci <- get_bls_data(
+  "https://download.bls.gov/pub/time.series/ci/ci.data.1.AllData",
+  "anesta@dotdashmdp.com"
+)
 
 # Converting dates to yearquarter data type and filtering to only include 
 # data after Q1 2020 and for total compensation for all civilian workers
@@ -428,9 +453,8 @@ all_eci %>%
 # quarters (CPI data is monthly) and getting a quarterly average CPI value for 
 # all items. All items seasonally-adjusted from here: https://beta.bls.gov/dataViewer/view/timeseries/CUSR0000SA0
 
-general_cpi <- read_delim(file = "https://download.bls.gov/pub/time.series/cu/cu.data.1.AllItems", 
-                          delim = "\t", trim_ws = T, col_names = T,
-                          col_types = cols(.default = col_character())) %>% 
+general_cpi <- get_bls_data("https://download.bls.gov/pub/time.series/cu/cu.data.1.AllItems",
+                            "anesta@dotdashmdp.com") %>% 
   mutate(date = as.yearqtr(base::as.Date(paste0(year, "-", str_sub(period, 2, 3), "-01")), "%Y-%m-%d"),
          value = as.double(value)) %>% 
   filter(series_id == "CUSR0000SA0", date >= as.yearqtr("2020 Q1")) %>% 
@@ -462,16 +486,16 @@ write_csv(wage_changes, "./visualizations/wage_changes_general.csv")
 ## work sectors from Q1 2020 (pre-pandemic) to Q2 2022
 
 # Reading in the ECI series reference file for correct sector name column
-eci_series <- read_delim(file = "https://download.bls.gov/pub/time.series/ci/ci.series", 
-                         delim = "\t", trim_ws = T, col_names = T,
-                         col_types = cols(.default = col_character()))
+eci_series <- get_bls_data(
+  "https://download.bls.gov/pub/time.series/ci/ci.series",
+  "anesta@dotdashmdp.com"
+)
 
 # Joining the ECI series and industry reference file with the full ECI data.
 all_eci_joined <- all_eci %>% 
   left_join(eci_series, by = "series_id") %>% 
-  left_join(read_delim(file = "https://download.bls.gov/pub/time.series/ci/ci.industry", 
-                       delim = "\t", trim_ws = T, col_names = T,
-                       col_types = cols(.default = col_character())), by = "industry_code")
+  left_join(get_bls_data("https://download.bls.gov/pub/time.series/ci/ci.industry",
+                         "anesta@dotdashmdp.com"), by = "industry_code")
 
 # Filter ECI data to seasonally-adjusted nominal and real compensation in industries
 # that don't include goods-producing, service-producing, or "all industries" 
@@ -532,9 +556,8 @@ all_eci_joined %>%
     pct_chg = ((value - lead(value)) / lead(value)) * 100
   ) %>% 
   filter(date == max(date)) %>% 
-  left_join(read_delim(file = "https://download.bls.gov/pub/time.series/ci/ci.occupation", 
-                       delim = "\t", trim_ws = T, col_names = T,
-                       col_types = cols(.default = col_character())), by = "occupation_code") %>% 
+  left_join(get_bls_data("https://download.bls.gov/pub/time.series/ci/ci.occupation",
+                         "anesta@dotdashmdp.com"), by = "occupation_code") %>% 
   
   arrange(desc(pct_chg)) %>% 
   left_join(general_cpi, by = "date") %>% 
@@ -551,14 +574,12 @@ write_csv(occupation_wage_change, "./visualizations/occupation_wage_change.csv")
 ## Q2 '19 to Q2 '22 (Yo3Y, through the pandemic)
 
 # Reading in the reference file for the CPS earnings data
-read_delim(file = "https://download.bls.gov/pub/time.series/le/le.series", 
-           delim = "\t", trim_ws = T, col_names = T,
-           col_types = cols(.default = col_character())) -> le_series
+get_bls_data("https://download.bls.gov/pub/time.series/le/le.series",
+             "anesta@dotdashmdp.com") -> le_series
 
 # Reading in the earnings data from the CPS 
-read_delim(file = "https://download.bls.gov/pub/time.series/le/le.data.1.AllData", 
-           delim = "\t", trim_ws = T, col_names = T,
-           col_types = cols(.default = col_character())) -> all_le_cps
+get_bls_data("https://download.bls.gov/pub/time.series/le/le.data.1.AllData",
+             "anesta@dotdashmdp.com") -> all_le_cps
 
 # Series codes needed for Asian, Black, Latino/a, and White men and women
 # usual weekly earnings
